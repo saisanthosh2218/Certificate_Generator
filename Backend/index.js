@@ -1,18 +1,38 @@
 const express = require("express");
+const app = express();
 const { PDFDocument, rgb, StandardFonts, degrees } = require("pdf-lib");
 const fs = require("fs").promises;
 const path = require("path");
 const cors = require("cors");
-
-const app = express();
-const port = 6257;
-
+const multer = require("multer");
+const mongoose = require("mongoose");
 app.use(express.json());
-app.use(cors());
+app.use(cors({ origin: true }));
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-const certificatesDir = path.join(__dirname, "saved_pdfs");
+// Connect to MongoDB
+mongoose
+  .connect("mongodb://localhost:27017/certficates")
+  .then(() => console.log("Database connection successful"))
+  .catch((err) => console.error("Database connection error:", err));
 
-async function createOrModifyPdf(name) {
+// Define Mongoose schema
+const schema = new mongoose.Schema({
+  name: { type: String },
+  email: {
+    type: String,
+    required: true,
+    // unique: true,
+  },
+  fileName: { type: String },
+});
+
+const pdfSchema = mongoose.model("certificatelists", schema);
+const port = 6257;
+const certificatesDir = path.join(__dirname, "uploads");
+
+// Create PDF function
+async function createPdf(name) {
   const pdfPath = path.join(__dirname, "cert.pdf");
   const existingPdfBytes = await fs.readFile(pdfPath);
 
@@ -24,7 +44,7 @@ async function createOrModifyPdf(name) {
   const { width, height } = firstPage.getSize();
 
   firstPage.drawText(`${name}`, {
-    x: 310,
+    x: 315,
     y: height / 2,
     size: 45,
     font: helveticaFont,
@@ -36,58 +56,73 @@ async function createOrModifyPdf(name) {
   return pdfBytes;
 }
 
-async function savePdf(name, pdfBytes, type) {
-  const savePath = path.join(certificatesDir, `${name}_certificate.pdf`);
+// Save PDF to disk function
+async function savePdf(name, pdfBytes) {
+  const fileName = `${name}.pdf`;
+  const savePath = path.join(certificatesDir, fileName);
   await fs.writeFile(savePath, pdfBytes);
+  return fileName; // Return only the filename
 }
 
-app.post("/create-document", async (req, res) => {
-  const { name } = req.body;
+// Multer storage configuration
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    console.log("Destination directory:", certificatesDir); // Log destination directory
+    cb(null, certificatesDir); // Correct path for saving uploads
+  },
+  filename: function (req, file, cb) {
+    const uniqueName = `${Date.now()}-${file.originalname}`;
+    console.log("Uploaded file info:", file); // Log file info
+    cb(null, uniqueName); // Use unique name
+  },
+});
 
-  if (!name) {
-    return res.status(400).json({ error: "Name is required" });
+const upload = multer({ storage });
+
+// Route to create and store PDF document
+app.post("/create-document", upload.single("pdfTemplate"), async (req, res) => {
+  const { name, email } = req.body;
+
+  if (!name || !email) {
+    return res.status(400).json({ error: "Name and Email are required" });
   }
 
   try {
-    const pdfBytes = await createOrModifyPdf(name);
-    await savePdf(name, pdfBytes, "created");
+    const pdfBytes = await createPdf(name);
+    const fileName = await savePdf(name, pdfBytes);
+
+    // Save only the filename, not the full path
+    const certificate = new pdfSchema({ name, email, fileName });
+    const savedCertificate = await certificate.save();
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename=${name}_certificate.pdf`
-    );
+    res.setHeader("Content-Disposition", `attachment; filename=${fileName}`);
     res.send(Buffer.from(pdfBytes));
   } catch (error) {
-    res.status(500).json({ error: "An error occurred while creating the PDF" });
+    console.error("Error creating document:", error); // Better error handling
+    res.status(500).json({ error: "Failed to create document" });
   }
 });
 
-app.get("/show_pdf", (req, res) => {
-  res.sendFile(path.join(certificatesDir, "John sechsd_certificate.pdf"));
+// Route to fetch PDF by ID
+app.get("/show_pdf/:id", async (req, res) => {
+  const id = req.params.id; // Extract the ID
+  console.log("Requested ID:", id); // Log the ID
+
+  try {
+    const certificate = await pdfSchema.findById(id);
+    if (!certificate) {
+      return res.status(404).json({ error: "Certificate not found" });
+    }
+
+    const fileName = certificate.fileName;
+    const filePath = path.join("uploads", fileName); // Simplified path
+
+    res.sendFile(filePath, { root: __dirname }); // Use root option to resolve path
+  } catch (error) {
+    console.error("Error fetching the PDF:", error); // Log the error
+    res.status(500).json({ error: "An error occurred while fetching the PDF" });
+  }
 });
 
-// app.post("/modify-document", async (req, res) => {
-//   const { name } = req.body;
-
-//   if (!name) {
-//     return res.status(400).json({ error: "Name is required" });
-//   }
-
-//   try {
-//     const pdfBytes = await createOrModifyPdf(name);
-//     await fs.mkdir(certificatesDir, { recursive: true });
-//     await savePdf(name, pdfBytes, "modified");
-//     res.setHeader("Content-Type", "application/pdf");
-//     res.setHeader(
-//       "Content-Disposition",
-//       `attachment; filename=${name}-modified-certificate.pdf`
-//     );
-//     res.send(Buffer.from(pdfBytes));
-//   } catch (error) {
-//     res
-//       .status(500)
-//       .json({ error: "An error occurred while modifying the PDF" });
-//   }
-// });
-
+// Start the server
 app.listen(port, () => console.log(`Listening on port ${port}!`));
